@@ -57,20 +57,23 @@ class FieldDecoder(object):
     def __init__(self, table = {}):
         self.table = table
         
-    def decode(self, field_value):
+    def decode(self, addr, field_value, width):
         for name, value in self.table.items():
             if field_value == value:
                 return name
         return '0x%x' % field_value;
 
 class UnusedDecoder(FieldDecoder):
-    def decode(self, field_value):
+    def decode(self, addr, field_value, width):
         if field_value == 0:
             return None
         return '0x%x' % field_value;
 
 class TargetDecoder(FieldDecoder):
-    def decode(self, field_value):
+    def decode(self, addr, field_value, width):
+        if width == 8:
+            field_value |= ((addr + 1) & 0xf00)
+
         return symtab.get_by_value(field_value, '0x%03x' % field_value)
 
 class RegisterDecoder(FieldDecoder):
@@ -96,7 +99,7 @@ class BitFieldDecoder(FieldDecoder):
     def __init__(self, table = {}):
         self.table = table
 
-    def decode(self, field_value):
+    def decode(self, addr, field_value, width):
         l = []
         for name, value in self.table.items():
             if field_value & value:
@@ -148,8 +151,8 @@ class Field(object):
     def get_mask(self):
         return ((1 << self.width) - 1) << self.lsb
 
-    def decode(self, field_value):
-        return self.field_decoders.get(self.name, self.default_decoder).decode(field_value)
+    def decode(self, addr, field_value):
+        return self.field_decoders.get(self.name, self.default_decoder).decode(addr, field_value, self.width)
 
 
 encodings = [
@@ -377,7 +380,7 @@ def disassemble(addr, opcode):
 
     fieldlist = []
     for field in sorted(fields.keys(), reverse=True):
-        decoded = inst.fields[field].decode(field_value)
+        decoded = inst.fields[field].decode(addr, fields[field])
         if decoded is not None:
             fieldlist.append(decoded)
     fields = ','.join(fieldlist)
@@ -418,7 +421,7 @@ def pass2_dis_inst(label, addr, opcode):
 
     return line
 
-def pass2(code, disfile):
+def pass2(code, disfile, dump=False):
     next_addr = -1
     for addr in range(2048):
         if symtab.has_value(addr) or (code[addr] is not None):
@@ -430,6 +433,8 @@ def pass2(code, disfile):
             label = symtab.get_by_value(addr, '')
             opcode = code[addr]
             line = pass2_dis_inst(label, addr, opcode)
+            if dump and (code[addr] is not None):
+                line += '\t;%03x: %06x' % (addr, opcode)
             print(line, file = disfile)
         if code[addr] is not None:
             next_addr = addr + 1
@@ -461,10 +466,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('objectfile', type=argparse.FileType('r'))
     parser.add_argument('disfile', type=argparse.FileType('w'), nargs='?', default = sys.stdout)
+    parser.add_argument('--dump', dest='dump', action='store_true', help='include address and instruction word in comment field')
     args = parser.parse_args()
 
     code = read_object_file(args.objectfile)
     args.objectfile.close()
 
     pass1(code)
-    pass2(code, args.disfile)
+    pass2(code, args.disfile, args.dump)
