@@ -54,8 +54,11 @@ symtab = SymbolTable()
 Inst = collections.namedtuple('Inst', ['mnem', 'bits', 'mask', 'fields'])
 
 class FieldDecoder(object):
-    def __init__(self, table = {}):
-        self.table = table
+    def __init__(self, table = None):
+        if table is None:
+            self.table = {}
+        else:
+            self.table = table
         
     def decode(self, addr, field_value, width):
         for name, value in self.table.items():
@@ -77,23 +80,39 @@ class TargetDecoder(FieldDecoder):
         return symtab.get_by_value(field_value, '0x%03x' % field_value)
 
 class RegisterDecoder(FieldDecoder):
-    def __init__(self):
-        super().__init__({'GL':    0x0,
-                          'GH':    0x1,
-                          'RBAL':  0x2,
-                          'RBAH':  0x3,
-                          'RSRCL': 0x4,
-                          'RSRCH': 0x5,
-                          'RDSTL': 0x6,
-                          'RDSTH': 0x7,
-                          'RIRL':  0x8,
-                          'RIRH':  0x9,
-                          'RPSWL': 0xa,
-                          'RPSWH': 0xb,
-                          'SPL':   0xc,
-                          'SPH':   0xd,
-                          'PCL':   0xe,
-                          'PCH':   0xf})
+    def __init__(self, arch):
+        self.arch = arch
+        self.regs = { 'lsi11':   {0x2: 'rbal',
+                                  0x3: 'rbah',
+                                  0x4: 'rsrcl',
+                                  0x5: 'rsrch',
+                                  0x6: 'rdstl',
+                                  0x7: 'rdsth',
+                                  0x8: 'rirl',
+                                  0x9: 'rirh',
+                                  0xa: 'rpswl',
+                                  0xb: 'rpswh',
+                                  0xc: 'spl',
+                                  0xd: 'sph',
+                                  0xe: 'pcl',
+                                  0xf: 'pch'},
+                      # Pascal Microengine register definitions are tentative
+                      'pascal':  {0xa: 'ipcl',
+                                  0xb: 'ipch',
+                                  0xc: 'spl',
+                                  0xd: 'sph',
+                                  0xe: 'mpl',
+                                  0xf: 'mph'},
+                      'default': {0x0: 'gl',
+                                  0x1: 'gh'}}
+
+    def decode(self, addr, field_value, width):
+        if self.arch is not None and field_value in self.regs[self.arch]:
+            return self.regs[self.arch][field_value]
+        elif field_value in self.regs['default']:
+            return self.regs['default'][field_value]
+        else:
+            return 'r%x' % field_value
 
 class BitFieldDecoder(FieldDecoder):
     def __init__(self, table = {}):
@@ -137,15 +156,15 @@ class InputDecoder(FieldDecoder):
                    
 
 class Field(object):
-    def __init__(self, name, lsb, width):
+    def __init__(self, arch, name, lsb, width):
         self.name = name
         self.lsb = lsb
         self.width = width
         self.default_decoder = FieldDecoder()
         self.field_decoders = { 'x': UnusedDecoder(),
                                 'T': TargetDecoder(),
-                                'A': RegisterDecoder(),
-                                'B': RegisterDecoder(),
+                                'A': RegisterDecoder(arch),
+                                'B': RegisterDecoder(arch),
                                 'I': InterruptDecoder() }
 
     def get_mask(self):
@@ -278,14 +297,14 @@ encodings = [
     ['1101 1101 BBBB AAAA', 'srbf'],  # Shift Right Byte, update condition code Flags
     ['1101 1110 BBBB AAAA', 'srw'],   # Shift Right Word
     ['1101 1111 BBBB AAAA', 'srwf'],  # Shift Right Word, update condition code Flags
-    ['1110 0000 BBBB AAAA', 'ib'],    # Input Byte
-    ['1110 0001 BBBB AAAA', 'ibf'],   # Input Byte, update condition code Flags
-    ['1110 0010 BBBB AAAA', 'iw'],    # Input Word
-    ['1110 0011 BBBB AAAA', 'iwf'],   # Input Word, update condition code Flags
-    ['1110 0100 BBBB AAAA', 'isb'],   # Input Status Byte
-    ['1110 0101 BBBB AAAA', 'isbf'],  # Input Status Byte, update condition code Flags
-    ['1110 0110 BBBB AAAA', 'isw'],   # Input Status Word
-    ['1110 0111 BBBB AAAA', 'iswf'],  # Input Status Word, update condition code Flags
+    ['1110 0000 LLLL AAAA', 'ib'],    # Input Byte
+    ['1110 0001 LLLL AAAA', 'ibf'],   # Input Byte, update condition code Flags
+    ['1110 0010 LLLL AAAA', 'iw'],    # Input Word
+    ['1110 0011 LLLL AAAA', 'iwf'],   # Input Word, update condition code Flags
+    ['1110 0100 LLLL AAAA', 'isb'],   # Input Status Byte
+    ['1110 0101 LLLL AAAA', 'isbf'],  # Input Status Byte, update condition code Flags
+    ['1110 0110 uuuu AAAA', 'isw'],   # Input Status Word
+    ['1110 0111 uuuu AAAA', 'iswf'],  # Input Status Word, update condition code Flags
     ['1110 1100 BBBB AAAA', 'mi'],    # Modify microInstruction
     ['1110 1110 BBBB AAAA', 'ltr'],   # Load Translation Register
     ['1111 0000 BBBB AAAA', 'rib1'],  # Read and Increment Byte by 1
@@ -317,7 +336,7 @@ encodings = [
 # 1110 1101 xxxx xxxx  (MI according to AM100 manual)
 # 1110 1111 xxxx xxxx  (LTR according to AM100 manual)
 
-def encoding_parse(mnem, encoding):
+def encoding_parse(arch, mnem, encoding):
     encoding = encoding.replace(' ', '')
     bits = 0
     mask = 0
@@ -331,7 +350,7 @@ def encoding_parse(mnem, encoding):
             mask |= (1 << i)
         else:
             if char not in fields:
-                fields[char] = Field(char, i, 0)
+                fields[char] = Field(arch, char, i, 0)
             assert i == fields[char].lsb + fields[char].width
             fields[char].width += 1
     return Inst(mnem, bits, mask, fields)
@@ -339,11 +358,11 @@ def encoding_parse(mnem, encoding):
 inst_by_mnem = {}
 inst_by_opcode = [None] * 256
 
-def opcode_init():
+def opcode_init(arch):
     for encoding, mnem in encodings:
         if mnem in inst_by_mnem:
             raise Exception('duplicate mnemonic: %s' % mnem)
-        inst = encoding_parse(mnem, encoding)
+        inst = encoding_parse(arch, mnem, encoding)
         inst_by_mnem[mnem] = inst
         hb = inst.bits >> 8
         hm = inst.mask >> 8
@@ -452,7 +471,14 @@ def read_object_file(f):
     return obj
 
 if __name__ == '__main__':
-    opcode_init()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('objectfile', type=argparse.FileType('r'))
+    parser.add_argument('disfile', type=argparse.FileType('w'), nargs='?', default = sys.stdout)
+    parser.add_argument('--arch', choices=['lsi11', 'pascal'], help='architecture, used for register and field definitions')
+    parser.add_argument('--dump', action='store_true', help='include address and instruction word in comment field')
+    args = parser.parse_args()
+
+    opcode_init(args.arch)
 
     if False:
         for mnem in sorted(inst_by_mnem.keys()):
@@ -462,12 +488,6 @@ if __name__ == '__main__':
         for opcode in range(0, 0x10000, 0x100):
             mnem, fields, extras = disassemble(opcode)
             print('%04x' % opcode, mnem, fields)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('objectfile', type=argparse.FileType('r'))
-    parser.add_argument('disfile', type=argparse.FileType('w'), nargs='?', default = sys.stdout)
-    parser.add_argument('--dump', dest='dump', action='store_true', help='include address and instruction word in comment field')
-    args = parser.parse_args()
 
     code = read_object_file(args.objectfile)
     args.objectfile.close()
